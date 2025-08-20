@@ -21,6 +21,8 @@ type FileAnalysis struct {
 type Analyzer interface {
     GetPRDiff(baseRef, headRef string) (string, error)
     AnalyzeAndPrioritize(fullDiff string, baseRef, headRef string) (string, error)
+    AnalyzeFiles(baseRef, headRef string) ([]FileAnalysis, error)
+    BuildDiffFromAnalyses(analyses []FileAnalysis, baseRef, headRef string) (string, error)
 }
 
 type diffAnalyzer struct {
@@ -67,15 +69,25 @@ func (da *diffAnalyzer) GetPRDiff(baseRef, headRef string) (string, error) {
 
 func (da *diffAnalyzer) AnalyzeAndPrioritize(fullDiff string, baseRef, headRef string) (string, error) {
     estimatedTokens := len(fullDiff) / 4
-    
+
     if estimatedTokens <= da.maxTokens {
         return fullDiff, nil
     }
 
+    analyses, err := da.AnalyzeFiles(baseRef, headRef)
+    if err != nil {
+        return "", err
+    }
+
+    // Build prioritized diff
+    return da.buildPrioritizedDiff(analyses, baseRef, headRef)
+}
+
+func (da *diffAnalyzer) AnalyzeFiles(baseRef, headRef string) ([]FileAnalysis, error) {
     // Get changed files
     changedFiles, err := da.getChangedFiles(baseRef, headRef)
     if err != nil {
-        return "", err
+        return nil, err
     }
 
     // Analyze each file
@@ -98,8 +110,7 @@ func (da *diffAnalyzer) AnalyzeAndPrioritize(fullDiff string, baseRef, headRef s
         return analyses[i].Tokens < analyses[j].Tokens
     })
 
-    // Build prioritized diff
-    return da.buildPrioritizedDiff(analyses, baseRef, headRef)
+    return analyses, nil
 }
 
 func (da *diffAnalyzer) getChangedFiles(baseRef, headRef string) ([]string, error) {
@@ -221,6 +232,10 @@ func (da *diffAnalyzer) shouldIncludeFile(filepath string) bool {
     }
 
     return true
+}
+
+func (da *diffAnalyzer) BuildDiffFromAnalyses(analyses []FileAnalysis, baseRef, headRef string) (string, error) {
+    return da.buildPrioritizedDiff(analyses, baseRef, headRef)
 }
 
 func (da *diffAnalyzer) buildPrioritizedDiff(analyses []FileAnalysis, baseRef, headRef string) (string, error) {

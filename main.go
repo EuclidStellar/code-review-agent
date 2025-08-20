@@ -15,6 +15,12 @@ import (
 	"github.com/euclidstellar/code-review-agent/internal/utils"
 )
 
+const (
+	LargePRMinTokens         = 12000
+	PrioritizedReviewMaxTokens = 12400
+	ChunkTargetTokens        = 6200
+)
+
 func main() {
 	logger := utils.NewLogger()
 	if err := run(logger); err != nil {
@@ -55,6 +61,16 @@ func run(logger *utils.Logger) error {
 		return nil
 	}
 
+	estimatedTokens := len(prDiff) / 4
+	logger.Info("Estimated total diff tokens: ~%d", estimatedTokens)
+
+	// New logic for large PRs: if total tokens exceed the minimum, handle with chunking.
+	if estimatedTokens >= LargePRMinTokens {
+		logger.Info("Large PR detected. Performing prioritized, chunked review.")
+		return handleMultiReview(ctx, cfg, ghClient, diffAnalyzer, logger)
+	}
+
+	// --- Existing Review Logic for smaller PRs ---
 	logger.Info("Analyzing diff (original size: %d bytes)", len(prDiff))
 	prioritizedDiff, err := diffAnalyzer.AnalyzeAndPrioritize(prDiff, cfg.BaseRef, cfg.HeadRef)
 	if err != nil {
@@ -62,7 +78,6 @@ func run(logger *utils.Logger) error {
 	}
 	logger.Info("Prioritized diff size: %d bytes (~%d tokens)", len(prioritizedDiff), len(prioritizedDiff)/4)
 
-	// --- Review Logic ---
 	review, provider, err := generateReview(ctx, cfg, prioritizedDiff, ghClient, logger)
 	if err != nil {
 		logger.Error("All review providers failed. Posting static fallback. Final error: %v", err)
@@ -79,6 +94,99 @@ func run(logger *utils.Logger) error {
 	logger.GitHubOutput("review-posted", "true")
 	logger.GitHubOutput("review-provider", provider)
 	return nil
+}
+
+func handleMultiReview(ctx context.Context, cfg *config.Config, ghClient *github.Client, diffAnalyzer diff.Analyzer, logger *utils.Logger) error {
+	// 1. Get all changed files, sorted by priority.
+	allAnalyses, err := diffAnalyzer.AnalyzeFiles(cfg.BaseRef, cfg.HeadRef)
+	if err != nil {
+		return fmt.Errorf("failed to analyze files for chunking: %w", err)
+	}
+
+	// 2. Select a prioritized subset of files up to PrioritizedReviewMaxTokens.
+	prioritizedAnalyses := []diff.FileAnalysis{}
+	currentTokens := 0
+	for _, analysis := range allAnalyses {
+		if currentTokens+analysis.Tokens > PrioritizedReviewMaxTokens {
+			break // Stop once we exceed the total limit for the prioritized review.
+		}
+		prioritizedAnalyses = append(prioritizedAnalyses, analysis)
+		currentTokens += analysis.Tokens
+	}
+	logger.Info("Selected %d high-priority files with a total of ~%d tokens for review.", len(prioritizedAnalyses), currentTokens)
+
+	// 3. Split the prioritized files into exactly two chunks.
+	chunks := splitIntoTwoChunks(prioritizedAnalyses, ChunkTargetTokens)
+	logger.Info("Split prioritized files into %d chunks.", len(chunks))
+
+	for i, chunk := range chunks {
+		logger.Info("Processing chunk %d/%d with %d files (~%d tokens)...", i+1, len(chunks), len(chunk.Analyses), chunk.TotalTokens)
+
+		diff, err := diffAnalyzer.BuildDiffFromAnalyses(chunk.Analyses, cfg.BaseRef, cfg.HeadRef)
+		if err != nil {
+			logger.Error("Failed to build diff for chunk %d: %v. Skipping.", i+1, err)
+			continue
+		}
+
+		review, provider, err := generateReview(ctx, cfg, diff, ghClient, logger)
+		if err != nil {
+			logger.Error("Failed to generate review for chunk %d: %v. Posting fallback.", i+1, err)
+			review = generateFallbackReview(diff, err.Error())
+			provider = "static-fallback"
+		}
+
+		// Add a header to each review comment
+		reviewHeader := fmt.Sprintf("## 🧩 Prioritized Code Review (Part %d/%d)\n\n", i+1, len(chunks))
+		finalReview := reviewHeader + review
+
+		if err := ghClient.PostComment(ctx, cfg.PRNumber, finalReview); err != nil {
+			logger.Error("Failed to post comment for chunk %d: %v", i+1, err)
+		} else {
+			logger.Info("Successfully posted review for chunk %d using %s.", i+1, provider)
+		}
+	}
+
+	logger.GitHubOutput("review-posted", "true")
+	logger.GitHubOutput("review-provider", "github-models/chunked")
+	return nil
+}
+
+type AnalysisChunk struct {
+	Analyses    []diff.FileAnalysis
+	TotalTokens int
+}
+
+// splitIntoTwoChunks divides a list of file analyses into exactly two chunks.
+// The first chunk is filled up to the target token size, and the second gets the rest.
+func splitIntoTwoChunks(analyses []diff.FileAnalysis, targetTokens int) []AnalysisChunk {
+	if len(analyses) == 0 {
+		return []AnalysisChunk{}
+	}
+
+	chunk1 := AnalysisChunk{}
+	
+	splitIndex := 0
+	for i, analysis := range analyses {
+		if chunk1.TotalTokens > 0 && chunk1.TotalTokens+analysis.Tokens > targetTokens && i > 0 {
+			break
+		}
+		chunk1.Analyses = append(chunk1.Analyses, analysis)
+		chunk1.TotalTokens += analysis.Tokens
+		splitIndex = i + 1
+	}
+
+	// If all files fit into the first chunk, or there's only one file
+	if splitIndex >= len(analyses) {
+		return []AnalysisChunk{chunk1}
+	}
+
+	chunk2 := AnalysisChunk{}
+	chunk2.Analyses = analyses[splitIndex:]
+	for _, analysis := range chunk2.Analyses {
+		chunk2.TotalTokens += analysis.Tokens
+	}
+
+	return []AnalysisChunk{chunk1, chunk2}
 }
 
 func generateReview(ctx context.Context, cfg *config.Config, diff string, ghClient *github.Client, logger *utils.Logger) (string, string, error) {
