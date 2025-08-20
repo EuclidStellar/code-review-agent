@@ -57,6 +57,7 @@ jobs:
           images: ghcr.io/${{ github.repository }}
           # The action automatically creates tags from the release version.
           # For a release 'v1.2.3', it will generate tags: 'v1.2.3', 'v1.2', 'v1', and 'latest'.
+          tags: type=raw,value=v1
 
       # Step 5: Builds the Docker image and pushes it to GHCR.
       # This step uses the Dockerfile in the root of the repository.
