@@ -47,4 +47,4 @@ outputs:
 
 runs:
   using: 'docker'
-  image: 'docker://ghcr.io/euclidstellar/code-review-agent:v1'
+  image: 'docker://ghcr.io/euclidstellar/code-review-agent:latest'
