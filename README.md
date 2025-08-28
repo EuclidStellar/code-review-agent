@@ -1,6 +1,7 @@
 # KeployAI Code Review Action
 
 [![GitHub Marketplace](https://img.shields.io/badge/Marketplace-Smart%20AI%20Code%20Review-blue.svg?colorA=24292e&colorB=0366d6&style=flat&longCache=true&logo=github)](https://github.com/marketplace/actions/smart-ai-code-review-action)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/EuclidStellar/code-review-agent)
 
 An intelligent GitHub Action that provides automated, AI-powered code reviews on your pull requests. It features a resilient fallback system, visual summaries, and smart diff analysis to deliver professional-grade feedback.
 
